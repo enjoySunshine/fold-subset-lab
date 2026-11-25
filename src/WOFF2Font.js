@@ -4,6 +4,7 @@ import { TTFFont } from './TTFFont';
 import TTFGlyph, { Point } from './glyph/TTFGlyph';
 import WOFF2Glyph from './glyph/WOFF2Glyph';
 import WOFF2Directory from './tables/WOFF2Directory';
+import WOFF2Subset from './subset/WOFF2Subset';
 import { asciiDecoder } from './utils';
 
 /**
@@ -165,6 +166,17 @@ export class WOFF2Font extends TTFFont {
     }
 
     this._transformedGlyphs = glyphs;
+  }
+
+  createSubset() {
+    // A transformed glyf table has no plain sfnt loca/glyf bytes to copy, so
+    // it needs a subset that re-encodes the decoded outlines. A WOFF2 whose
+    // glyf is not transformed is handled like an ordinary TrueType font.
+    if (this.directory.tables.glyf?.transformed) {
+      return new WOFF2Subset(this);
+    }
+
+    return super.createSubset();
   }
 }
 

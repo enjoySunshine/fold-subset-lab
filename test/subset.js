@@ -134,6 +134,168 @@ describe('font subsetting', function () {
     });
   });
 
+  describe('WOFF2 subsetting', function () {
+    let font = fontkit.openSync(
+      new URL('data/OpenSans/OpenSans-Regular.woff2', import.meta.url),
+    );
+    let ttfFont = fontkit.openSync(
+      new URL('data/OpenSans/OpenSans-Regular.ttf', import.meta.url),
+    );
+
+    function encodeSubset(string) {
+      let glyphs = font.glyphsForString(string);
+      let subset = font.createSubset();
+      for (let glyph of glyphs) {
+        subset.includeGlyph(glyph);
+      }
+
+      return { subset, glyphs, f: fontkit.create(subset.encode()) };
+    }
+
+    it('should re-encode simple glyph outlines', function () {
+      for (let string of ['A', 'B', 'e']) {
+        let { f, glyphs } = encodeSubset(string);
+        let original = glyphs[0];
+
+        assert.equal(f.numGlyphs, 2);
+        let glyph = f.getGlyph(1);
+        assert.equal(glyph.cbox.minX, original.cbox.minX);
+        assert.equal(glyph.cbox.minY, original.cbox.minY);
+        assert.equal(glyph.cbox.maxX, original.cbox.maxX);
+        assert.equal(glyph.cbox.maxY, original.cbox.maxY);
+        assert.equal(glyph.path.toSVG(), original.path.toSVG());
+
+        let metrics = f.hmtx.metrics.get(1);
+        assert.equal(metrics.advance, original.advanceWidth);
+        assert.equal(
+          metrics.bearing,
+          font.hmtx.metrics.get(original.id).bearing,
+        );
+      }
+    });
+
+    it('should produce outlines identical to the uncompressed font', function () {
+      for (let string of ['A', 'B', 'e', 'é']) {
+        let { f, subset, glyphs } = encodeSubset(string);
+        let ttfGlyph = ttfFont.glyphsForString(string)[0];
+        let subGid = subset.mapping[glyphs[0].id];
+        assert.equal(f.getGlyph(subGid).path.toSVG(), ttfGlyph.path.toSVG());
+      }
+    });
+
+    it('should keep composite glyphs composite with their offsets', function () {
+      let original = font.glyphsForString('é')[0];
+      let originalGlyph = original._decode();
+      let { subset, f } = encodeSubset('é');
+
+      // The .notdef, the composite itself, and its two components.
+      assert.equal(f.numGlyphs, 4);
+
+      let subGid = subset.mapping[original.id];
+      let glyph = f.getGlyph(subGid);
+      let decoded = glyph._decode();
+      assert.equal(decoded.numberOfContours, -1);
+      assert.equal(decoded.components.length, 2);
+      assert.deepEqual(
+        decoded.components.map((c) => [c.dx, c.dy]),
+        [
+          [0, 0],
+          [78, 0],
+        ],
+      );
+
+      // The whole glyph and every component keep their original outlines.
+      assert.equal(glyph.path.toSVG(), original.path.toSVG());
+      for (let i = 0; i < 2; i++) {
+        let component = f.getGlyph(decoded.components[i].glyphID);
+        let originalComponent = font.getGlyph(
+          originalGlyph.components[i].glyphID,
+        );
+        assert.equal(component.path.toSVG(), originalComponent.path.toSVG());
+        assert.equal(component.cbox.minX, originalComponent.cbox.minX);
+        assert.equal(component.cbox.minY, originalComponent.cbox.minY);
+        assert.equal(component.cbox.maxX, originalComponent.cbox.maxX);
+        assert.equal(component.cbox.maxY, originalComponent.cbox.maxY);
+      }
+
+      assert.deepEqual(
+        [glyph.cbox.minX, glyph.cbox.minY, glyph.cbox.maxX, glyph.cbox.maxY],
+        [115, -20, 1042, 1569],
+      );
+      let metrics = f.hmtx.metrics.get(subGid);
+      assert.equal(metrics.advance, 1149);
+      assert.equal(metrics.bearing, 115);
+    });
+
+    it('should remap component ids when components are renumbered', function () {
+      // A is included first, so every id in the é composite differs from
+      // what it was in the source font.
+      let { subset, f } = encodeSubset('Aé');
+      let eAcute = font.glyphsForString('é')[0];
+      let subGid = subset.mapping[eAcute.id];
+      let decoded = f.getGlyph(subGid)._decode();
+
+      assert.equal(f.numGlyphs, 5);
+      for (let component of decoded.components) {
+        // The referenced component exists in the subset and keeps an outline.
+        assert.ok(component.glyphID < f.numGlyphs);
+        assert.notEqual(f.getGlyph(component.glyphID).path.toSVG(), '');
+      }
+      assert.equal(f.getGlyph(subGid).path.toSVG(), eAcute.path.toSVG());
+    });
+
+    it('should keep both outlines no matter which glyph is included first', function () {
+      for (let string of ['Aé', 'éA']) {
+        let { subset, f, glyphs } = encodeSubset(string);
+        for (let glyph of glyphs) {
+          let subGid = subset.mapping[glyph.id];
+          assert.equal(f.getGlyph(subGid).path.toSVG(), glyph.path.toSVG());
+        }
+      }
+    });
+
+    it('should use the ordinary subset path when glyf is not transformed', function () {
+      let untransformed = fontkit.openSync(
+        new URL(
+          'data/fonttest/TestGVAROne.untransformed.woff2',
+          import.meta.url,
+        ),
+      );
+      assert.equal(untransformed.directory.tables.glyf.transformed, false);
+
+      let subset = untransformed.createSubset();
+      let glyph = untransformed.getGlyph(1);
+      subset.includeGlyph(glyph);
+      let f = fontkit.create(subset.encode());
+      assert.equal(f.getGlyph(1).path.toSVG(), glyph.path.toSVG());
+    });
+
+    it('should preserve varied outlines and metrics of a variable WOFF2', function () {
+      let ttfVariation = fontkit
+        .openSync(new URL('data/Mada/Mada-VF.ttf', import.meta.url))
+        .getVariation({ wght: 900 });
+      let woff2Variation = fontkit
+        .openSync(new URL('data/Mada/Mada-VF.woff2', import.meta.url))
+        .getVariation({ wght: 900 });
+
+      let glyphs = woff2Variation.glyphsForString('BDx');
+      let subset = woff2Variation.createSubset();
+      for (let glyph of glyphs) {
+        subset.includeGlyph(glyph);
+      }
+      let f = fontkit.create(subset.encode());
+
+      for (let i = 0; i < glyphs.length; i++) {
+        let subGid = subset.mapping[glyphs[i].id];
+        assert.equal(f.getGlyph(subGid).path.toSVG(), glyphs[i].path.toSVG());
+        assert.equal(
+          f.hmtx.metrics.get(subGid).bearing,
+          ttfVariation.glyphsForString('BDx')[i].cbox.minX,
+        );
+      }
+    });
+  });
+
   describe('CFF subsetting', function () {
     let font = fontkit.openSync(
       new URL('data/SourceSansPro/SourceSansPro-Regular.otf', import.meta.url),
